@@ -1,3 +1,838 @@
-Alice was beginning to get very tired of sitting by her sister on the bank, and of having nothing to do: once or twice she had peeped into the book her sister was reading, but it had no pictures or conversations in it, "and what is the use of a book," thought Alice "without pictures or conversations?"
+How transferable are features in deep neural
+networks?
+Jason Yosinski,1 Jeff Clune,2 Yoshua Bengio,3 and Hod Lipson4
+1 Dept. Computer Science, Cornell University
+2 Dept. Computer Science, University of Wyoming
+3 Dept. Computer Science & Operations Research, University of Montreal
+4 Dept. Mechanical & Aerospace Engineering, Cornell University
+Abstract
+Many deep neural networks trained on natural images exhibit a curious phenomenon in common: on the first layer they learn features similar to Gabor filters
+and color blobs. Such first-layer features appear not to be specific to a particular
+dataset or task, but general in that they are applicable to many datasets and tasks.
+Features must eventually transition from general to specific by the last layer of
+the network, but this transition has not been studied extensively. In this paper we
+experimentally quantify the generality versus specificity of neurons in each layer
+of a deep convolutional neural network and report a few surprising results. Transferability is negatively affected by two distinct issues: (1) the specialization of
+higher layer neurons to their original task at the expense of performance on the
+target task, which was expected, and (2) optimization difficulties related to splitting networks between co-adapted neurons, which was not expected. In an example network trained on ImageNet, we demonstrate that either of these two issues
+may dominate, depending on whether features are transferred from the bottom,
+middle, or top of the network. We also document that the transferability of features decreases as the distance between the base task and target task increases, but
+that transferring features even from distant tasks can be better than using random
+features. A final surprising result is that initializing a network with transferred
+features from almost any number of layers can produce a boost to generalization
+that lingers even after fine-tuning to the target dataset.
+1 Introduction
+Modern deep neural networks exhibit a curious phenomenon: when trained on images, they all tend
+to learn first-layer features that resemble either Gabor filters or color blobs. The appearance of these
+filters is so common that obtaining anything else on a natural image dataset causes suspicion of
+poorly chosen hyperparameters or a software bug. This phenomenon occurs not only for different
+datasets, but even with very different training objectives, including supervised image classification
+(Krizhevsky et al., 2012), unsupervised density learning (Lee et al., 2009), and unsupervised learning of sparse representations (Le et al., 2011).
+Because finding these standard features on the first layer seems to occur regardless of the exact cost
+function and natural image dataset, we call these first-layer features general. On the other hand, we
+know that the features computed by the last layer of a trained network must depend greatly on the
+chosen dataset and task. For example, in a network with an N-dimensional softmax output layer that
+has been successfully trained toward a supervised classification objective, each output unit will be
+specific to a particular class. We thus call the last-layer features specific. These are intuitive notions
+of general and specific for which we will provide more rigorous definitions below. If first-layer
+1
+arXiv:1411.1792v1 [cs.LG] 6 Nov 2014
+features are general and last-layer features are specific, then there must be a transition from general
+to specific somewhere in the network. This observation raises a few questions:
+• Can we quantify the degree to which a particular layer is general or specific?
+• Does the transition occur suddenly at a single layer, or is it spread out over several layers?
+• Where does this transition take place: near the first, middle, or last layer of the network?
+We are interested in the answers to these questions because, to the extent that features within a
+network are general, we will be able to use them for transfer learning (Caruana, 1995; Bengio
+et al., 2011; Bengio, 2011). In transfer learning, we first train a base network on a base dataset and
+task, and then we repurpose the learned features, or transfer them, to a second target network to
+be trained on a target dataset and task. This process will tend to work if the features are general,
+meaning suitable to both base and target tasks, instead of specific to the base task.
+When the target dataset is significantly smaller than the base dataset, transfer learning can be a
+powerful tool to enable training a large target network without overfitting; Recent studies have
+taken advantage of this fact to obtain state-of-the-art results when transferring from higher layers
+(Donahue et al., 2013a; Zeiler and Fergus, 2013; Sermanet et al., 2014), collectively suggesting that
+these layers of neural networks do indeed compute features that are fairly general. These results
+further emphasize the importance of studying the exact nature and extent of this generality.
+The usual transfer learning approach is to train a base network and then copy its first n layers to
+the first n layers of a target network. The remaining layers of the target network are then randomly
+initialized and trained toward the target task. One can choose to backpropagate the errors from
+the new task into the base (copied) features to fine-tune them to the new task, or the transferred
+feature layers can be left frozen, meaning that they do not change during training on the new task.
+The choice of whether or not to fine-tune the first n layers of the target network depends on the
+size of the target dataset and the number of parameters in the first n layers. If the target dataset is
+small and the number of parameters is large, fine-tuning may result in overfitting, so the features
+are often left frozen. On the other hand, if the target dataset is large or the number of parameters is
+small, so that overfitting is not a problem, then the base features can be fine-tuned to the new task
+to improve performance. Of course, if the target dataset is very large, there would be little need to
+transfer because the lower level filters could just be learned from scratch on the target dataset. We
+compare results from each of these two techniques — fine-tuned features or frozen features — in
+the following sections.
+In this paper we make several contributions:
+1. We define a way to quantify the degree to which a particular layer is general or specific, namely,
+how well features at that layer transfer from one task to another (Section 2). We then train pairs
+of convolutional neural networks on the ImageNet dataset and characterize the layer-by-layer
+transition from general to specific (Section 4), which yields the following four results.
+2. We experimentally show two separate issues that cause performance degradation when using transferred features without fine-tuning: (i) the specificity of the features themselves, and
+(ii) optimization difficulties due to splitting the base network between co-adapted neurons on
+neighboring layers. We show how each of these two effects can dominate at different layers of
+the network. (Section 4.1)
+3. We quantify how the performance benefits of transferring features decreases the more dissimilar
+the base task and target task are. (Section 4.2)
+4. On the relatively large ImageNet dataset, we find lower performance than has been previously
+reported for smaller datasets (Jarrett et al., 2009) when using features computed from random
+lower-layer weights vs. trained weights. We compare random weights to transferred weights—
+both frozen and fine-tuned—and find the transferred weights perform better. (Section 4.3)
+5. Finally, we find that initializing a network with transferred features from almost any number
+of layers can produce a boost to generalization performance after fine-tuning to a new dataset.
+This is particularly surprising because the effect of having seen the first dataset persists even
+after extensive fine-tuning. (Section 4.1)
+2
+2 Generality vs. Specificity Measured as Transfer Performance
+We have noted the curious tendency of Gabor filters and color blobs to show up in the first layer of
+neural networks trained on natural images. In this study, we define the degree of generality of a set
+of features learned on task A as the extent to which the features can be used for another task B. It
+is important to note that this definition depends on the similarity between A and B. We create pairs
+of classification tasks A and B by constructing pairs of non-overlapping subsets of the ImageNet
+dataset.1 These subsets can be chosen to be similar to or different from each other.
+To create tasks A and B, we randomly split the 1000 ImageNet classes into two groups each containing 500 classes and approximately half of the data, or about 645,000 examples each. We train
+one eight-layer convolutional network on A and another on B. These networks, which we call baseA
+and baseB, are shown in the top two rows of Figure 1. We then choose a layer n from {1, 2, . . . , 7}
+and train several new networks. In the following explanation and in Figure 1, we use layer n = 3 as
+the example layer chosen. First, we define and train the following two networks:
+• A selffer network B3B: the first 3 layers are copied from baseB and frozen. The five higher
+layers (4–8) are initialized randomly and trained on dataset B. This network is a control for the
+next transfer network. (Figure 1, row 3)
+• A transfer network A3B: the first 3 layers are copied from baseA and frozen. The five higher
+layers (4–8) are initialized randomly and trained toward dataset B. Intuitively, here we copy
+the first 3 layers from a network trained on dataset A and then learn higher layer features on top
+of them to classify a new target dataset B. If A3B performs as well as baseB, there is evidence
+that the third-layer features are general, at least with respect to B. If performance suffers, there
+is evidence that the third-layer features are specific to A. (Figure 1, row 4)
+We repeated this process for all n in {1, 2, . . . , 7}
+2
+and in both directions (i.e. AnB and BnA). In
+the above two networks, the transferred layers are frozen. We also create versions of the above two
+networks where the transferred layers are fine-tuned:
+• A selffer network B3B+: just like B3B, but where all layers learn.
+• A transfer network A3B+: just like A3B, but where all layers learn.
+To create base and target datasets that are similar to each other, we randomly assign half of the 1000
+ImageNet classes to A and half to B. ImageNet contains clusters of similar classes, particularly dogs
+and cats, like these 13 classes from the biological family Felidae: {tabby cat, tiger cat, Persian cat,
+Siamese cat, Egyptian cat, mountain lion, lynx, leopard, snow leopard, jaguar, lion, tiger, cheetah}.
+On average, A and B will each contain approximately 6 or 7 of these felid classes, meaning that
+base networks trained on each dataset will have features at all levels that help classify some types
+of felids. When generalizing to the other dataset, we would expect that the new high-level felid
+detectors trained on top of old low-level felid detectors would work well. Thus A and B are similar
+when created by randomly assigning classes to each, and we expect that transferred features will
+perform better than when A and B are less similar.
+Fortunately, in ImageNet we are also provided with a hierarchy of parent classes. This information
+allowed us to create a special split of the dataset into two halves that are as semantically different
+from each other as possible: with dataset A containing only man-made entities and B containing
+natural entities. The split is not quite even, with 551 classes in the man-made group and 449 in the
+natural group. Further details of this split and the classes in each half are given in the supplementary
+material. In Section 4.2 we will show that features transfer more poorly (i.e. they are more specific)
+when the datasets are less similar.
+1The ImageNet dataset, as released in the Large Scale Visual Recognition Challenge 2012 (ILSVRC2012)
+(Deng et al., 2009) contains 1,281,167 labeled training images and 50,000 test images, with each image labeled
+with one of 1000 classes.
+2Note that n = 8 doesn’t make sense in either case: B8B is just baseB, and A8B would not work because
+it is never trained on B.
+3
+input
+A
+labels
+A
+WA1 WA2 WA3 WA4 WA5 WA6 WA7 WA8
+input
+B
+labels
+B
+WB1 WB2 WB3 WB4 WB5 WB6 WB7 WB8
+WA1 WA2 WA3
+or or or
+B3B
+and
+B3B+
+or or or
+WB1 WB2 WB3
+baseA
+baseB
+A3B
+and
+A3B+
+Figure 1: Overview of the experimental treatments and controls. Top two rows: The base networks
+are trained using standard supervised backprop on only half of the ImageNet dataset (first row: A
+half, second row: B half). The labeled rectangles (e.g. WA1) represent the weight vector learned for
+that layer, with the color indicating which dataset the layer was originally trained on. The vertical,
+ellipsoidal bars between weight vectors represent the activations of the network at each layer. Third
+row: In the selffer network control, the first n weight layers of the network (in this example, n = 3)
+are copied from a base network (e.g. one trained on dataset B), the upper 8 − n layers are randomly
+initialized, and then the entire network is trained on that same dataset (in this example, dataset B).
+The first n layers are either locked during training (“frozen” selffer treatment B3B) or allowed to
+learn (“fine-tuned” selffer treatment B3B+). This treatment reveals the occurrence of fragile coadaptation, when neurons on neighboring layers co-adapt during training in such a way that cannot
+be rediscovered when one layer is frozen. Fourth row: The transfer network experimental treatment
+is the same as the selffer treatment, except that the first n layers are copied from a network trained
+on one dataset (e.g. A) and then the entire network is trained on the other dataset (e.g. B). This
+treatment tests the extent to which the features on layer n are general or specific.
+3 Experimental Setup
+Since Krizhevsky et al. (2012) won the ImageNet 2012 competition, there has been much interest
+and work toward tweaking hyperparameters of large convolutional models. However, in this study
+we aim not to maximize absolute performance, but rather to study transfer results on a well-known
+architecture. We use the reference implementation provided by Caffe (Jia et al., 2014) so that our
+results will be comparable, extensible, and useful to a large number of researchers. Further details of
+the training setup (learning rates, etc.) are given in the supplementary material, and code and parameter files to reproduce these experiments are available at http://yosinski.com/transfer.
+4 Results and Discussion
+We performed three sets of experiments. The main experiment has random A/B splits and is discussed in Section 4.1. Section 4.2 presents an experiment with the man-made/natural split. Section 4.3 describes an experiment with random weights.
+4
+0 1 2 3 4 5 6 7
+0.52
+0.54
+0.56
+0.58
+0.60
+0.62
+0.64
+0.66
+Top-1 accuracy (higher is better)
+baseB
+selffer BnB
+selffer BnB
++
+transfer AnB
+transfer AnB
++
+0 1 2 3 4 5 6 7
+Layer n at which network is chopped and retrained
+0.54
+0.56
+0.58
+0.60
+0.62
+0.64
+Top-1 accuracy (higher is better)
+5: Transfer + fine-tuning improves generalization
+3: Fine-tuning recovers co-adapted interactions
+2: Performance drops
+ due to fragile
+ co-adaptation
+4: Performance
+drops due to
+ representation
+specificity
+Figure 2: The results from this paper’s main experiment. Top: Each marker in the figure represents
+the average accuracy over the validation set for a trained network. The white circles above n =
+0 represent the accuracy of baseB. There are eight points, because we tested on four separate
+random A/B splits. Each dark blue dot represents a BnB network. Light blue points represent
+BnB+ networks, or fine-tuned versions of BnB. Dark red diamonds are AnB networks, and light
+red diamonds are the fine-tuned AnB+ versions. Points are shifted slightly left or right for visual
+clarity. Bottom: Lines connecting the means of each treatment. Numbered descriptions above each
+line refer to which interpretation from Section 4.1 applies.
+4.1 Similar Datasets: Random A/B splits
+The results of all A/B transfer learning experiments on randomly split (i.e. similar) datasets are
+shown3
+in Figure 2. The results yield many different conclusions. In each of the following interpretations, we compare the performance to the base case (white circles and dotted line in Figure 2).
+3AnA networks and BnB networks are statistically equivalent, because in both cases a network is trained
+on 500 random classes. To simplify notation we label these BnB networks. Similarly, we have aggregated the
+statistically identical BnA and AnB networks and just call them AnB.
+5
+1. The white baseB circles show that a network trained to classify a random subset of 500 classes
+attains a top-1 accuracy of 0.625, or 37.5% error. This error is lower than the 42.5% top-1 error
+attained on the 1000-class network. While error might have been higher because the network is
+trained on only half of the data, which could lead to more overfitting, the net result is that error is
+lower because there are only 500 classes, so there are only half as many ways to make mistakes.
+2. The dark blue BnB points show a curious behavior. As expected, performance at layer one is
+the same as the baseB points. That is, if we learn eight layers of features, save the first layer of
+learned Gabor features and color blobs, reinitialize the whole network, and retrain it toward the
+same task, it does just as well. This result also holds true for layer 2. However, layers 3, 4, 5,
+and 6, particularly 4 and 5, exhibit worse performance. This performance drop is evidence that
+the original network contained fragile co-adapted features on successive layers, that is, features
+that interact with each other in a complex or fragile way such that this co-adaptation could not be
+relearned by the upper layers alone. Gradient descent was able to find a good solution the first
+time, but this was only possible because the layers were jointly trained. By layer 6 performance
+is nearly back to the base level, as is layer 7. As we get closer and closer to the final, 500-way
+softmax output layer 8, there is less to relearn, and apparently relearning these one or two layers
+is simple enough for gradient descent to find a good solution. Alternately, we may say that
+there is less co-adaptation of features between layers 6 & 7 and between 7 & 8 than between
+previous layers. To our knowledge it has not been previously observed in the literature that such
+optimization difficulties may be worse in the middle of a network than near the bottom or top.
+3. The light blue BnB+ points show that when the copied, lower-layer features also learn on the
+target dataset (which here is the same as the base dataset), performance is similar to the base
+case. Such fine-tuning thus prevents the performance drop observed in the BnB networks.
+4. The dark red AnB diamonds show the effect we set out to measure in the first place: the transferability of features from one network to another at each layer. Layers one and two transfer almost
+perfectly from A to B, giving evidence that, at least for these two tasks, not only are the first-layer
+Gabor and color blob features general, but the second layer features are general as well. Layer
+three shows a slight drop, and layers 4-7 show a more significant drop in performance. Thanks
+to the BnB points, we can tell that this drop is from a combination of two separate effects: the
+drop from lost co-adaptation and the drop from features that are less and less general. On layers
+3, 4, and 5, the first effect dominates, whereas on layers 6 and 7 the first effect diminishes and
+the specificity of representation dominates the drop in performance.
+Although examples of successful feature transfer have been reported elsewhere in the literature
+(Girshick et al., 2013; Donahue et al., 2013b), to our knowledge these results have been limited
+to noticing that transfer from a given layer is much better than the alternative of training strictly
+on the target task, i.e. noticing that the AnB points at some layer are much better than training
+all layers from scratch. We believe this is the first time that (1) the extent to which transfer is
+successful has been carefully quantified layer by layer, and (2) that these two separate effects
+have been decoupled, showing that each effect dominates in part of the regime.
+5. The light red AnB+ diamonds show a particularly surprising effect: that transferring features
+and then fine-tuning them results in networks that generalize better than those trained directly on
+the target dataset. Previously, the reason one might want to transfer learned features is to enable
+training without overfitting on small target datasets, but this new result suggests that transferring
+features will boost generalization performance even if the target dataset is large. Note that this
+effect should not be attributed to the longer total training time (450k base iterations + 450k finetuned iterations for AnB+ vs. 450k for baseB), because the BnB+ networks are also trained
+for the same longer length of time and do not exhibit this same performance improvement.
+Thus, a plausible explanation is that even after 450k iterations of fine-tuning (beginning with
+completely random top layers), the effects of having seen the base dataset still linger, boosting
+generalization performance. It is surprising that this effect lingers through so much retraining.
+This generalization improvement seems not to depend much on how much of the first network
+we keep to initialize the second network: keeping anywhere from one to seven layers produces
+improved performance, with slightly better performance as we keep more layers. The average
+boost across layers 1 to 7 is 1.6% over the base case, and the average if we keep at least five
+layers is 2.1%.4 The degree of performance boost is shown in Table 1.
+4We aggregate performance over several layers because each point is computationally expensive to obtain
+(9.5 days on a GPU), so at the time of publication we have few data points per layer. The aggregation is
+6
+Table 1: Performance boost of AnB+ over controls, averaged over different ranges of layers.
+mean boost mean boost
+layers over over
+aggregated baseB selffer BnB+
+1-7 1.6% 1.4%
+3-7 1.8% 1.4%
+5-7 2.1% 1.7%
+4.2 Dissimilar Datasets: Splitting Man-made and Natural Classes Into Separate Datasets
+As mentioned previously, the effectiveness of feature transfer is expected to decline as the base and
+target tasks become less similar. We test this hypothesis by comparing transfer performance on
+similar datasets (the random A/B splits discussed above) to that on dissimilar datasets, created by
+assigning man-made object classes to A and natural object classes to B. This man-made/natural split
+creates datasets as dissimilar as possible within the ImageNet dataset.
+The upper-left subplot of Figure 3 shows the accuracy of a baseA and baseB network (white circles)
+and BnA and AnB networks (orange hexagons). Lines join common target tasks. The upper of the
+two lines contains those networks trained toward the target task containing natural categories (baseB
+and AnB). These networks perform better than those trained toward the man-made categories, which
+may be due to having only 449 classes instead of 551, or simply being an easier task, or both.
+4.3 Random Weights
+We also compare to random, untrained weights because Jarrett et al. (2009) showed — quite strikingly — that the combination of random convolutional filters, rectification, pooling, and local normalization can work almost as well as learned features. They reported this result on relatively small
+networks of two or three learned layers and on the smaller Caltech-101 dataset (Fei-Fei et al., 2004).
+It is natural to ask whether or not the nearly optimal performance of random filters they report carries
+over to a deeper network trained on a larger dataset.
+The upper-right subplot of Figure 3 shows the accuracy obtained when using random filters for the
+first n layers for various choices of n. Performance falls off quickly in layers 1 and 2, and then
+drops to near-chance levels for layers 3+, which suggests that getting random weights to work in
+convolutional neural networks may not be as straightforward as it was for the smaller network size
+and smaller dataset used by Jarrett et al. (2009). However, the comparison is not straightforward.
+Whereas our networks have max pooling and local normalization on layers 1 and 2, just as Jarrett
+et al. (2009) did, we use a different nonlinearity (relu(x) instead of abs(tanh(x))), different layer
+sizes and number of layers, as well as other differences. Additionally, their experiment only considered two layers of random weights. The hyperparameter and architectural choices of our network
+collectively provide one new datapoint, but it may well be possible to tweak layer sizes and random
+initialization details to enable much better performance for random weights.5
+The bottom subplot of Figure 3 shows the results of the experiments of the previous two sections
+after subtracting the performance of their individual base cases. These normalized performances
+are plotted across the number of layers n that are either random or were trained on a different,
+base dataset. This comparison makes two things apparent. First, the transferability gap when using
+frozen features grows more quickly as n increases for dissimilar tasks (hexagons) than similar tasks
+(diamonds), with a drop by the final layer for similar tasks of only 8% vs. 25% for dissimilar tasks.
+Second, transferring even from a distant task is better than using random filters. One possible reason
+this latter result may differ from Jarrett et al. (2009) is because their fully-trained (non-random)
+networks were overfitting more on the smaller Caltech-101 dataset than ours on the larger ImageNet
+informative, however, because the performance at each layer is based on different random draws of the upper
+layer initialization weights. Thus, the fact that layers 5, 6, and 7 result in almost identical performance across
+random draws suggests that multiple runs at a given layer would result in similar performance.
+5
+For example, the training loss of the network with three random layers failed to converge, producing only
+chance-level validation performance. Much better convergence may be possible with different hyperparameters.
+7
+0 1 2 3 4 5 6 7
+0.3
+0.4
+0.5
+0.6
+0.7
+Top-1 accuracy
+Man-made/Natural split
+0 1 2 3 4 5 6 7
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6 Random, untrained filters
+0 1 2 3 4 5 6 7
+Layer n at which network is chopped and retrained
+−0.30
+−0.25
+−0.20
+−0.15
+−0.10
+−0.05
+0.00
+Relative top-1 accuracy (higher is better)
+reference
+mean AnB, random splits
+mean AnB, m/n split
+random features
+Figure 3: Performance degradation vs. layer. Top left: Degradation when transferring between dissimilar tasks (from man-made classes of ImageNet to natural classes or vice versa). The upper line
+connects networks trained to the “natural” target task, and the lower line connects those trained toward the “man-made” target task. Top right: Performance when the first n layers consist of random,
+untrained weights. Bottom: The top two plots compared to the random A/B split from Section 4.1
+(red diamonds), all normalized by subtracting their base level performance.
+dataset, making their random filters perform better by comparison. In the supplementary material,
+we provide an extra experiment indicating the extent to which our networks are overfit.
+5 Conclusions
+We have demonstrated a method for quantifying the transferability of features from each layer of
+a neural network, which reveals their generality or specificity. We showed how transferability is
+negatively affected by two distinct issues: optimization difficulties related to splitting networks in
+the middle of fragilely co-adapted layers and the specialization of higher layer features to the original
+task at the expense of performance on the target task. We observed that either of these two issues
+may dominate, depending on whether features are transferred from the bottom, middle, or top of
+the network. We also quantified how the transferability gap grows as the distance between tasks
+increases, particularly when transferring higher layers, but found that even features transferred from
+distant tasks are better than random weights. Finally, we found that initializing with transferred
+features can improve generalization performance even after substantial fine-tuning on a new task,
+which could be a generally useful technique for improving deep neural network performance.
 
-So she was considering in her own mind (as well as she could, for the hot day made her feel very sleepy and stupid), whether the pleasure of making a daisy-chain would be worth the trouble of getting up and picking the daisies, when suddenly a White Rabbit with pink eyes ran close by her.
+
+Prototypical Networks for Few-shot Learning
+Jake Snell
+University of Toronto∗
+Kevin Swersky
+Twitter
+Richard S. Zemel
+University of Toronto, Vector Institute
+Abstract
+We propose prototypical networks for the problem of few-shot classification, where
+a classifier must generalize to new classes not seen in the training set, given only
+a small number of examples of each new class. Prototypical networks learn a
+metric space in which classification can be performed by computing distances
+to prototype representations of each class. Compared to recent approaches for
+few-shot learning, they reflect a simpler inductive bias that is beneficial in this
+limited-data regime, and achieve excellent results. We provide an analysis showing
+that some simple design decisions can yield substantial improvements over recent
+approaches involving complicated architectural choices and meta-learning. We
+further extend prototypical networks to zero-shot learning and achieve state-of-theart results on the CU-Birds dataset.
+1 Introduction
+Few-shot classification [20, 16, 13] is a task in which a classifier must be adapted to accommodate
+new classes not seen in training, given only a few examples of each of these classes. A naive approach,
+such as re-training the model on the new data, would severely overfit. While the problem is quite
+difficult, it has been demonstrated that humans have the ability to perform even one-shot classification,
+where only a single example of each new class is given, with a high degree of accuracy [16].
+Two recent approaches have made significant progress in few-shot learning. Vinyals et al. [29]
+proposed matching networks, which uses an attention mechanism over a learned embedding of the
+labeled set of examples (the support set) to predict classes for the unlabeled points (the query set).
+Matching networks can be interpreted as a weighted nearest-neighbor classifier applied within an
+embedding space. Notably, this model utilizes sampled mini-batches called episodes during training,
+where each episode is designed to mimic the few-shot task by subsampling classes as well as data
+points. The use of episodes makes the training problem more faithful to the test environment and
+thereby improves generalization. Ravi and Larochelle [22] take the episodic training idea further
+and propose a meta-learning approach to few-shot learning. Their approach involves training an
+LSTM [9] to produce the updates to a classifier, given an episode, such that it will generalize well to
+a test-set. Here, rather than training a single model over multiple episodes, the LSTM meta-learner
+learns to train a custom model for each episode.
+We attack the problem of few-shot learning by addressing the key issue of overfitting. Since data is
+severely limited, we work under the assumption that a classifier should have a very simple inductive
+bias. Our approach, prototypical networks, is based on the idea that there exists an embedding in
+which points cluster around a single prototype representation for each class. In order to do this,
+we learn a non-linear mapping of the input into an embedding space using a neural network and
+take a class’s prototype to be the mean of its support set in the embedding space. Classification
+is then performed for an embedded query point by simply finding the nearest class prototype. We
+follow the same approach to tackle zero-shot learning; here each class comes with meta-data giving
+a high-level description of the class rather than a small number of labeled examples. We therefore
+learn an embedding of the meta-data into a shared space to serve as the prototype for each class.
+*Initial work by first author done while at Twitter.
+arXiv:1703.05175v2 [cs.LG] 19 Jun 2017
+c1
+c2
+c3
+x
+(a) Few-shot
+v1
+v2
+v3
+c1
+c2
+c3
+x
+(b) Zero-shot
+Figure 1: Prototypical networks in the few-shot and zero-shot scenarios. Left: Few-shot prototypes
+ck are computed as the mean of embedded support examples for each class. Right: Zero-shot
+prototypes ck are produced by embedding class meta-data vk. In either case, embedded query points
+are classified via a softmax over distances to class prototypes: pφ(y = k|x) ∝ exp(−d(fφ(x), ck)).
+Classification is performed, as in the few-shot scenario, by finding the nearest class prototype for an
+embedded query point.
+In this paper, we formulate prototypical networks for both the few-shot and zero-shot settings. We
+draw connections to matching networks in the one-shot setting, and analyze the underlying distance
+function used in the model. In particular, we relate prototypical networks to clustering [4] in order to
+justify the use of class means as prototypes when distances are computed with a Bregman divergence,
+such as squared Euclidean distance. We find empirically that the choice of distance is vital, as
+Euclidean distance greatly outperforms the more commonly used cosine similarity. On several
+benchmark tasks, we achieve state-of-the-art performance. Prototypical networks are simpler and
+more efficient than recent meta-learning algorithms, making them an appealing approach to few-shot
+and zero-shot learning.
+2 Prototypical Networks
+2.1 Notation
+In few-shot classification we are given a small support set of N labeled examples S =
+{(x1, y1), . . . ,(xN , yN )} where each xi ∈ R
+D is the D-dimensional feature vector of an example
+and yi ∈ {1, . . . , K} is the corresponding label. Sk denotes the set of examples labeled with class k.
+2.2 Model
+Prototypical networks compute an M-dimensional representation ck ∈ RM, or prototype, of each
+class through an embedding function fφ : R
+D → RM with learnable parameters φ. Each prototype
+is the mean vector of the embedded support points belonging to its class:
+ck =
+1
+|Sk|
+X
+(xi,yi)∈Sk
+fφ(xi) (1)
+Given a distance function d : RM × RM → [0, +∞), prototypical networks produce a distribution
+over classes for a query point x based on a softmax over distances to the prototypes in the embedding
+space:
+pφ(y = k | x) = exp(−d(fφ(x), ck))
+P
+k0 exp(−d(fφ(x), ck0 )) (2)
+Learning proceeds by minimizing the negative log-probability J(φ) = − log pφ(y = k | x) of the
+true class k via SGD. Training episodes are formed by randomly selecting a subset of classes from
+the training set, then choosing a subset of examples within each class to act as the support set and a
+subset of the remainder to serve as query points. Pseudocode to compute the loss J(φ) for a training
+episode is provided in Algorithm 1.
+2
+Algorithm 1 Training episode loss computation for prototypical networks. N is the number of
+examples in the training set, K is the number of classes in the training set, NC ≤ K is the number
+of classes per episode, NS is the number of support examples per class, NQ is the number of query
+examples per class. RANDOMSAMPLE(S, N) denotes a set of N elements chosen uniformly at
+random from set S, without replacement.
+Input: Training set D = {(x1, y1), . . . ,(xN , yN )}, where each yi ∈ {1, . . . , K}. Dk denotes the
+subset of D containing all elements (xi
+, yi) such that yi = k.
+Output: The loss J for a randomly generated training episode.
+V ← RANDOMSAMPLE({1, . . . , K}, NC ) . Select class indices for episode
+for k in {1, . . . , NC } do
+Sk ← RANDOMSAMPLE(DVk
+, NS) . Select support examples
+Qk ← RANDOMSAMPLE(DVk
+\ Sk, NQ) . Select query examples
+ck ←
+1
+NC
+X
+(xi,yi)∈Sk
+fφ(xi) . Compute prototype from support examples
+end for
+J ← 0 . Initialize loss
+for k in {1, . . . , NC } do
+for (x, y) in Qk do
+J ← J +
+1
+NC NQ
+"
+d(fφ(x), ck)) + logX
+k0
+exp(−d(fφ(x), ck))#
+. Update loss
+end for
+end for
+2.3 Prototypical Networks as Mixture Density Estimation
+For a particular class of distance functions, known as regular Bregman divergences [4], the prototypical networks algorithm is equivalent to performing mixture density estimation on the support set with
+an exponential family density. A regular Bregman divergence dϕ is defined as:
+
+where ϕ is a differentiable, strictly convex function of the Legendre type. Examples of Bregman
+divergences include squared Euclidean distance kz − z
+0k
+2
+and Mahalanobis distance.
+Prototype computation can be viewed in terms of hard clustering on the support set, with one cluster
+per class and each support point assigned to its corresponding class cluster. It has been shown [4]
+for Bregman divergences that the cluster representative achieving minimal distance to its assigned
+points is the cluster mean. Thus the prototype computation in Equation (1) yields optimal cluster
+representatives given the support set labels when a Bregman divergence is used.
+Moreover, any regular exponential family distribution pψ(z|θ) with parameters θ and cumulant
+function ψ can be written in terms of a uniquely determined regular Bregman divergence [4]:
+
+For an equally-weighted mixture model with one cluster per class, cluster assignment inference (6) is
+equivalent to query class prediction (2) with fφ(x) = z and ck = µ(θk). In this case, prototypical
+networks are effectively performing mixture density estimation with an exponential family distribution
+determined by dϕ. The choice of distance therefore specifies modeling assumptions about the classconditional data distribution in the embedding space.
+
+2.4 Reinterpretation as a Linear Model
+A simple analysis is useful in gaining insight into the nature of the learned classifier. When we use
+Euclidean distance , then the model in Equation (2) is equivalent to a linear
+model with a particular parameterization [19]. 
+The first term in Equation (7) is constant with respect to the class k, so it does not affect the softmax
+probabilities.
+
+We focus primarily on squared Euclidean distance (corresponding to spherical Gaussian densities) in
+this work. Our results indicate that Euclidean distance is an effective choice despite the equivalence
+to a linear model. We hypothesize this is because all of the required non-linearity can be learned
+within the embedding function. Indeed, this is the approach that modern neural network classification
+systems currently use, e.g., [14, 28].
+2.5 Comparison to Matching Networks
+Prototypical networks differ from matching networks in the few-shot case with equivalence in the
+one-shot scenario. Matching networks [29] produce a weighted nearest neighbor classifier given the
+support set, while prototypical networks produce a linear classifier when squared Euclidean distance
+is used. In the case of one-shot learning, ck = xk since there is only one support point per class, and
+matching networks and prototypical networks become equivalent.
+A natural question is whether it makes sense to use multiple prototypes per class instead of just one.
+If the number of prototypes per class is fixed and greater than 1, then this would require a partitioning
+scheme to further cluster the support points within a class. This has been proposed in Mensink
+et al. [19] and Rippel et al. [25]; however both methods require a separate partitioning phase that is
+decoupled from the weight updates, while our approach is simple to learn with ordinary gradient
+descent methods.
+Vinyals et al. [29] propose a number of extensions, including decoupling the embedding functions of
+the support and query points, and using a second-level, fully-conditional embedding (FCE) that takes
+into account specific points in each episode. These could likewise be incorporated into prototypical
+networks, however they increase the number of learnable parameters, and FCE imposes an arbitrary
+ordering on the support set using a bi-directional LSTM. Instead, we show that it is possible to
+achieve the same level of performance using simple design choices, which we outline next.
+2.6 Design Choices
+Distance metric Vinyals et al. [29] and Ravi and Larochelle [22] apply matching networks using
+cosine distance. However for both prototypical and matching networks any distance is permissible,
+and we found that using squared Euclidean distance can greatly improve results for both. We
+conjecture this is primarily due to cosine distance not being a Bregman divergence, and thus the
+equivalence to mixture density estimation discussed in Section 2.3 does not hold.
+Episode composition A straightforward way to construct episodes, used in Vinyals et al. [29] and
+Ravi and Larochelle [22], is to choose Nc classes and NS support points per class in order to match
+the expected situation at test-time. That is, if we expect at test-time to perform 5-way classification
+and 1-shot learning, then training episodes could be comprised of Nc = 5, NS = 1. We have found,
+however, that it can be extremely beneficial to train with a higher Nc, or “way”, than will be used
+at test-time. In our experiments, we tune the training Nc on a held-out validation set. Another
+consideration is whether to match NS, or “shot”, at train and test-time. For prototypical networks,
+we found that it is usually best to train and test with the same “shot” number.
+2.7 Zero-Shot Learning
+Zero-shot learning differs from few-shot learning in that instead of being given a support set of
+training points, we are given a class meta-data vector vk for each class. These could be determined
+4
+Table 1: Few-shot classification accuracies on Omniglot.
+5-way Acc. 20-way Acc.
+Model Dist. Fine Tune 1-shot 5-shot 1-shot 5-shot
+MATCHING NETWORKS [29] Cosine N 98.1% 98.9% 93.8% 98.5%
+MATCHING NETWORKS [29] Cosine Y 97.9% 98.7% 93.5% 98.7%
+NEURAL STATISTICIAN [6] - N 98.1% 99.5% 93.2% 98.1%
+PROTOTYPICAL NETWORKS (OURS) Euclid. N 98.8% 99.7% 96.0% 98.9%
+in advance, or they could be learned from e.g., raw text [7]. Modifying prototypical networks to deal
+with the zero-shot case is straightforward: we simply define ck = gϑ(vk) to be a separate embedding
+of the meta-data vector. An illustration of the zero-shot procedure for prototypical networks as
+it relates to the few-shot procedure is shown in Figure 1. Since the meta-data vector and query
+point come from different input domains, we found it was helpful empirically to fix the prototype
+embedding g to have unit length, however we do not constrain the query embedding f.
+3 Experiments
+For few-shot learning, we performed experiments on Omniglot [16] and the miniImageNet version
+of ILSVRC-2012 [26] with the splits proposed by Ravi and Larochelle [22]. We perform zero-shot
+experiments on the 2011 version of the Caltech UCSD bird dataset (CUB-200 2011) [31].
+3.1 Omniglot Few-shot Classification
+Omniglot [16] is a dataset of 1623 handwritten characters collected from 50 alphabets. There are 20
+examples associated with each character, where each example is drawn by a different human subject.
+We follow the procedure of Vinyals et al. [29] by resizing the grayscale images to 28 × 28 and
+augmenting the character classes with rotations in multiples of 90 degrees. We use 1200 characters
+plus rotations for training (4,800 classes in total) and the remaining classes, including rotations, for
+test. Our embedding architecture mirrors that used by Vinyals et al. [29] and is composed of four
+convolutional blocks. Each block comprises a 64-filter 3 × 3 convolution, batch normalization layer
+[10], a ReLU nonlinearity and a 2 × 2 max-pooling layer. When applied to the 28 × 28 Omniglot
+images this architecture results in a 64-dimensional output space. We use the same encoder for
+embedding both support and query points. All of our models were trained via SGD with Adam [11].
+We used an initial learning rate of 10−3
+and cut the learning rate in half every 2000 episodes. No
+regularization was used other than batch normalization.
+We trained prototypical networks using Euclidean distance in the 1-shot and 5-shot scenarios with
+training episodes containing 60 classes and 5 query points per class. We found that it is advantageous
+to match the training-shot with the test-shot, and to use more classes (higher “way”) per training
+episode rather than fewer. We compare against various baselines, including the neural statistician
+[6] and both the fine-tuned and non-fine-tuned versions of matching networks [29]. We computed
+classification accuracy for our models averaged over 1000 randomly generated episodes from the test
+set. The results are shown in Table 1 and to our knowledge they represent the state-of-the-art on this
+dataset.
+3.2 miniImageNet Few-shot Classification
+The miniImageNet dataset, originally proposed by Vinyals et al. [29], is derived from the larger
+ILSVRC-12 dataset [26]. The splits used by Vinyals et al. [29] consist of 60,000 color images of size
+84 × 84 divided into 100 classes with 600 examples each. For our experiments, we use the splits
+introduced by Ravi and Larochelle [22] in order to directly compare with state-of-the-art algorithms
+for few-shot learning. Their splits use a different set of 100 classes, divided into 64 training, 16
+validation, and 20 test classes. We follow their procedure by training on the 64 training classes and
+using the 16 validation classes for monitoring generalization performance only.
+We use the same four-block embedding architecture as in our Omniglot experiments, though here
+it results in a 1600-dimensional output space due to the increased size of the images. We also
+5
+Table 2: Few-shot classification accuracies on miniImageNet. All accuracy results are averaged over
+600 test episodes and are reported with 95% confidence intervals. ∗Results reported by [22].
+5-way Acc.
+Model Dist. Fine Tune 1-shot 5-shot
+BASELINE NEAREST NEIGHBORS∗ Cosine N 28.86 ± 0.54% 49.79 ± 0.79%
+MATCHING NETWORKS [29]∗ Cosine N 43.40 ± 0.78% 51.09 ± 0.71%
+MATCHING NETWORKS FCE [29]∗ Cosine N 43.56 ± 0.84% 55.31 ± 0.73%
+META-LEARNER LSTM [22]∗
+- N 43.44 ± 0.77% 60.60 ± 0.71%
+PROTOTYPICAL NETWORKS (OURS) Euclid. N 49.42 ± 0.78% 68.20 ± 0.66%
+5-way
+Cosine
+5-way
+Euclid.
+20-way
+Cosine
+20-way
+Euclid.
+1-shot
+20%
+30%
+40%
+50%
+60%
+70%
+80%
+1-shot Accuracy (5-way)
+Matching / Proto. Nets
+5-way
+Cosine
+5-way
+Euclid.
+20-way
+Cosine
+20-way
+Euclid.
+5-shot
+20%
+30%
+40%
+50%
+60%
+70%
+80%
+5-shot Accuracy (5-way)
+Matching Nets
+Proto. Nets
+Figure 2: Comparison showing the effect of distance metric and number of classes per training episode
+on 5-way classification accuracy for both matching and prototypical networks on miniImageNet.
+The x-axis indicates configuration of the training episodes (way, distance, and shot), and the y-axis
+indicates 5-way test accuracy for the corresponding shot. Error bars indicate 95% confidence intervals
+as computed over 600 test episodes. Note that matching networks and prototypical networks are
+identical in the 1-shot case.
+use the same learning rate schedule as in our Omniglot experiments and train until validation loss
+stops improving. We train using 30-way episodes for 1-shot classification and 20-way episodes for
+5-shot classification. We match train shot to test shot and each class contains 15 query points per
+episode. We compare to the baselines as reported by Ravi and Larochelle [22], which include a
+simple nearest neighbor approach on top of features learned by a classification network on the 64
+training classes. The other baselines are two non-fine-tuned variants of matching networks (both
+ordinary and FCE) and the Meta-Learner LSTM. As can be seen in Table 2, prototypical networks
+achieves state-of-the-art here by a wide margin.
+We conducted further analysis, to determine the effect of distance metric and the number of training
+classes per episode on the performance of prototypical networks and matching networks. To make
+the methods comparable, we use our own implementation of matching networks that utilizes the
+same embedding architecture as our prototypical networks. In Figure 2 we compare cosine vs.
+Euclidean distance and 5-way vs. 20-way training episodes in the 1-shot and 5-shot scenarios, with
+15 query points per class per episode. We note that 20-way achieves higher accuracy than 5-way
+and conjecture that the increased difficulty of 20-way classification helps the network to generalize
+better, because it forces the model to make more fine-grained decisions in the embedding space. Also,
+using Euclidean distance improves performance substantially over cosine distance. This effect is even
+more pronounced for prototypical networks, in which computing the class prototype as the mean of
+embedded support points is more naturally suited to Euclidean distances since cosine distance is not
+a Bregman divergence.
+3.3 CUB Zero-shot Classification
+In order to assess the suitability of our approach for zero-shot learning, we also run experiments on
+the Caltech-UCSD Birds (CUB) 200-2011 dataset [31]. The CUB dataset contains 11,788 images of
+200 bird species. We closely follow the procedure of Reed et al. [23] in preparing the data. We use
+6
+Table 3: Zero-shot classification accuracies on CUB-200.
+Model Image
+Features
+50-way Acc.
+0-shot
+ALE [1] Fisher 26.9%
+SJE [2] AlexNet 40.3%
+SAMPLE CLUSTERING [17] AlexNet 44.3%
+SJE [2] GoogLeNet 50.1%
+DS-SJE [23] GoogLeNet 50.4%
+DA-SJE [23] GoogLeNet 50.9%
+PROTO. NETS (OURS) GoogLeNet 54.6%
+their splits to divide the classes into 100 training, 50 validation, and 50 test. For images we use 1,024-
+dimensional features extracted by applying GoogLeNet [28] to middle, upper left, upper right, lower
+left, and lower right crops of the original and horizontally-flipped image2
+. At test time we use only
+the middle crop of the original image. For class meta-data we use the 312-dimensional continuous
+attribute vectors provided with the CUB dataset. These attributes encode various characteristics of
+the bird species such as their color, shape, and feather patterns.
+We learned a simple linear mapping on top of both the 1024-dimensional image features and the
+312-dimensional attribute vectors to produce a 1,024-dimensional output space. For this dataset we
+found it helpful to normalize the class prototypes (embedded attribute vectors) to be of unit length,
+since the attribute vectors come from a different domain than the images. Training episodes were
+constructed with 50 classes and 10 query images per class. The embeddings were optimized via SGD
+with Adam at a fixed learning rate of 10−4
+and weight decay of 10−5
+. Early stopping on validation
+loss was used to determine the optimal number of epochs for retraining on the training plus validation
+set.
+Table 3 shows that we achieve state-of-the-art results by a large margin when compared to methods
+utilizing attributes as class meta-data. We compare our method to other embedding approaches, such
+as ALE [1], SJE [2], and DS-SJE/DA-SJE [23]. We also compare to a recent clustering approach
+[17] which trains an SVM on a learned feature space obtained by fine-tuning AlexNet [14]. These
+zero-shot classification results demonstrate that our approach is general enough to be applied even
+when the data points (images) are from a different domain relative to the classes (attributes).
+4 Related Work
+The literature on metric learning is vast [15, 5]; we summarize here the work most relevant to our
+proposed method. Neighborhood Components Analysis (NCA) [8] learns a Mahalanobis distance to
+maximize K-nearest-neighbor’s (KNN) leave-one-out accuracy in the transformed space. Salakhutdinov and Hinton [27] extend NCA by using a neural network to perform the transformation. Large
+margin nearest neighbor (LMNN) classification [30] also attempts to optimize KNN accuracy but
+does so using a hinge loss that encourages the local neighborhood of a point to contain other points
+with the same label. The DNet-KNN [21] is another margin-based method that improves upon LMNN
+by utilizing a neural network to perform the embedding instead of a simple linear transformation.
+Of these, our method is most similar to the non-linear extension of NCA [27] because we use a
+neural network to perform the embedding and we optimize a softmax based on Euclidean distances
+in the transformed space, as opposed to a margin loss. A key distinction between our approach
+and non-linear NCA is that we form a softmax directly over classes, rather than individual points,
+computed from distances to each class’s prototype representation. This allows each class to have a
+concise representation independent of the number of data points and obviates the need to store the
+entire support set to make predictions.
+Our approach is also similar to the nearest class mean approach [19], where each class is represented
+by the mean of its examples. This approach was developed to rapidly incorporate new classes into
+a classifier without retraining, however it relies on a linear embedding and was designed to handle
+2
+Features downloaded from https://github.com/reedscot/cvpr2016.
+7
+the case where the novel classes come with a large number of examples. In contrast, our approach
+utilizes neural networks to non-linearly embed points and we couple this with episodic training
+in order to handle the few-shot scenario. Mensink et al. attempt to extend their approach to also
+perform non-linear classification, but they do so by allowing classes to have multiple prototypes.
+They find these prototypes in a pre-processing step by using k-means on the input space and then
+perform a multi-modal variant of their linear embedding. Prototypical networks, on the other hand,
+learn a non-linear embedding in an end-to-end manner with no such pre-processing, producing a
+non-linear classifier that still only requires one prototype per class. In addition, our approach naturally
+generalizes to other distance functions, particularly Bregman divergences.
+Another relevant few-shot learning method is the meta-learning approach proposed in Ravi and
+Larochelle [22]. The key insight here is that LSTM dynamics and gradient descent can be written
+in effectively the same way. An LSTM can then be trained to itself train a model from a given
+episode, with the performance goal of generalizing well on the query points. Matching networks
+and prototypical networks can also be seen as forms of meta-learning, in the sense that they produce
+simple classifiers dynamically from new training episodes; however the core embeddings they rely
+on are fixed after training. The FCE extension to matching nets involves a secondary embedding that
+depends on the support set. However, in the few-shot scenario the amount of data is so small that a
+simple inductive bias seems to work well, without the need to learn a custom embedding for each
+episode.
+Prototypical networks are also related to the neural statistician [6] from the generative modeling
+literature, which extends the variational autoencoder [12, 24] to learn generative models of datasets
+rather than individual points. One component of the neural statistician is the “statistic network” which
+summarizes a set of data points into a statistic vector. It does this by encoding each point within a
+dataset, taking a sample mean, and applying a post-processing network to obtain an approximate
+posterior over the statistic vector. Edwards and Storkey test their model for one-shot classification on
+the Omniglot dataset by considering each character to be a separate dataset and making predictions
+based on the class whose approximate posterior over the statistic vector has minimal KL-divergence
+from the posterior inferred by the test point. Like the neural statistician, we also produce a summary
+statistic for each class. However, ours is a discriminative model, as befits our discriminative task of
+few-shot classification.
+With respect to zero-shot learning, the use of embedded meta-data in prototypical networks resembles
+the method of [3] in that both predict the weights of a linear classifier. The DS-SJE and DA-SJE
+approach of [23] also learns deep multimodal embedding functions for images and class meta-data.
+Unlike ours, they learn using an empirical risk loss. Neither [3] nor [23] uses episodic training, which
+allows us to help speed up training and regularize the model.
+5 Conclusion
+We have proposed a simple method called prototypical networks for few-shot learning based on the
+idea that we can represent each class by the mean of its examples in a representation space learned
+by a neural network. We train these networks to specifically perform well in the few-shot setting by
+using episodic training. The approach is far simpler and more efficient than recent meta-learning
+approaches, and produces state-of-the-art results even without sophisticated extensions developed
+for matching networks (although these can be applied to prototypical nets as well). We show how
+performance can be greatly improved by carefully considering the chosen distance metric, and by
+modifying the episodic learning procedure. We further demonstrate how to generalize prototypical
+networks to the zero-shot setting, and achieve state-of-the-art results on the CUB-200 dataset. A
+natural direction for future work is to utilize Bregman divergences other than squared Euclidean
+distance, corresponding to class-conditional distributions beyond spherical Gaussians. We conducted
+preliminary explorations of this, including learning a variance per dimension for each class. This did
+not lead to any empirical gains, suggesting that the embedding network has enough flexibility on its
+own without requiring additional fitted parameters per class. Overall, the simplicity and effectiveness
+of prototypical networks makes it a promising approach for few-shot learning.
